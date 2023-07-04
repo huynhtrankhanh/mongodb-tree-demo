@@ -34,7 +34,7 @@ app.use(session({
 
 async function buildTree(data, l, r) {
   if (l > r) return null;
-
+  
   let node = new Node({ value: data[l] });
   if (l < r) {
     let mid = Math.floor((l + r) / 2);
@@ -55,33 +55,53 @@ app.post('/array', async (req, res) => {
   res.send('Array created successfully');
 });
 
-// Update the value at a given index.
+// Update node value and create new nodes along the way to keep previous state intact
 async function update(node, left, right, index, newValue) {
-  if (left === right) {
-    node.value = newValue;
+  let value = 0;
+  let leftId = node.left;
+  let rightId = node.right;
+  
+  if (left == right) {
+    value = newValue;
   } else {
     let mid = Math.floor((left + right) / 2);
+
     if (index <= mid) {
-      await update(node.left, left, mid, index, newValue);
+      const leftNode = await Node.findById(leftId, (err, doc) => doc);
+      leftId = (await update(leftNode, left, mid, index, newValue))._id;
     } else {
-      await update(node.right, mid + 1, right, index, newValue);
+      const rightNode = await Node.findById(rightId, (err, doc) => doc);
+      rightId = (await update(rightNode, mid + 1, right, index, newValue))._id;
     }
-    node.value = node.left.value + node.right.value;
+
+    const leftNode = await Node.findById(leftId, (err, doc) => doc);
+    const rightNode = await Node.findById(rightId, (err, doc) => doc);
+
+    value = leftNode.value + rightNode.value;
   }
-  await node.save();
+
+  let updatedNode = new Node({ left: leftId, right: rightId, value: value });
+  await updatedNode.save();
+  return updatedNode;
 }
 
-// Calculate the sum of an array segment.
+// Query for sum in the range [queryLeft, queryRight]
 async function query(node, left, right, queryLeft, queryRight) {
   if (queryRight < left || right < queryLeft) {
     return 0;
   }
+  
   if (queryLeft <= left && right <= queryRight) {
     return node.value;
   }
+
   let mid = Math.floor((left + right) / 2);
-  return (await query(node.left, left, mid, queryLeft, queryRight)) +
-         (await query(node.right, mid + 1, right, queryLeft, queryRight));
+  
+  const leftNode = await Node.findById(node.left, (err, doc) => doc);
+  const rightNode = await Node.findById(node.right, (err, doc) => doc);
+
+  return (await query(leftNode, left, mid, queryLeft, queryRight)) +
+         (await query(rightNode, mid + 1, right, queryLeft, queryRight));
 }
 
 app.put('/array/:id', async (req, res) => {
@@ -89,36 +109,37 @@ app.put('/array/:id', async (req, res) => {
   const id = req.params.id - 1;
   const arrayModel = await ArrayModel.findOne({ sessionID });
   if (!arrayModel) return res.status(404).send('Array not found');
-  const n = arrayModel.root.value;
+  
   let arrayNode = await Node.findById(arrayModel.root).exec();
 
   switch (req.body.action) {
-    case '1': // "Update"
+    case 'UPDATE':
       const index = req.body.index - 1;
       const value = req.body.value;
-      await update(arrayNode, 0, n - 1, index, value);
+      const updatedRoot = await update(arrayNode, 0, arrayNode.value - 1, index, value);
+      arrayModel.root = updatedRoot._id;
       break;
-
-    case '2': // "Query"
+    
+    case 'QUERY':
       const left = req.body.left - 1;
       const right = req.body.right - 1;
-      const sum = await query(arrayNode, 0, n - 1, left, right);
+      const sum = await query(arrayNode, 0, arrayNode.value - 1, left, right);
       res.send({ sum });
       return;
-
-    case '3': // "Clone"
-      const clonedRoot = new Node({ ...arrayNode.toObject() });
-      await clonedRoot.save();
-      await new ArrayModel({ sessionID, root: clonedRoot._id }).save();
-      break;
-      
+    
+    case 'CLONE':
+      const newArrayModel = new ArrayModel({ sessionID, root: arrayModel.root });
+      await newArrayModel.save();
+      res.send('Clone created successfully');
+      return;
+    
     default:
       res.status(400).send('Invalid action');
       return;
   }
 
   await arrayModel.save();
-  res.send('Done');
+  res.send('Operation was successful.');
 });
 
 const port = process.env.PORT || 3000;
